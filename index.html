@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no" />
+  <title>Stickman 跳一跳 - 纯前端小游戏</title>
+  <style>
+    :root { --bg: #f7f7f7; --ink: #222; --muted:#888; --accent:#4caf50; }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg:#111; --ink:#eee; --muted:#888; --accent:#66bb6a; }
+    }
+    html, body { height: 100%; margin: 0; background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, 'Helvetica Neue', Arial; }
+    .wrap { display:flex; flex-direction:column; align-items:center; gap:12px; padding:16px; }
+    h1 { font-size: 18px; margin: 12px 0 4px; font-weight: 700; }
+    .hint { font-size:12px; color: var(--muted); }
+    .hud { display:flex; gap:16px; font-variant-numeric: tabular-nums; }
+    .btn { border:1px solid var(--muted); background:transparent; color:var(--ink); padding:8px 12px; border-radius:10px; cursor:pointer; }
+    canvas { background: linear-gradient(#fff0, #fff0), var(--bg); box-shadow: 0 10px 30px rgba(0,0,0,.08); border-radius: 12px; max-width: 100%; touch-action: manipulation; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>小火柴人跳障碍（Stickman 版）</h1>
+    <div class="hud">
+      <div>分数：<span id="score">0</span></div>
+      <div>速度：<span id="speed">1.0x</span></div>
+      <div class="hint">电脑：Space / ↑ 跳跃，R 重开；手机：点屏幕跳</div>
+    </div>
+    <canvas id="game" width="800" height="220" aria-label="Dino Game" role="img"></canvas>
+    <div>
+      <button id="restart" class="btn">重新开始 (R)</button>
+    </div>
+  </div>
+
+  <script>
+  ;(() => {
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const speedEl = document.getElementById('speed');
+    const restartBtn = document.getElementById('restart');
+
+    // Retina 适配
+    function fitHiDPI() {
+      const ratio = Math.max(1, Math.floor(window.devicePixelRatio || 1));
+      const cssW = canvas.clientWidth || canvas.width;
+      const cssH = canvas.clientHeight || canvas.height;
+      canvas.width = cssW * ratio;
+      canvas.height = cssH * ratio;
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+    }
+    fitHiDPI();
+    window.addEventListener('resize', fitHiDPI);
+
+    // 常量
+    const W = 800, H = 220;
+    const GROUND_Y = 180; // 地平线
+    const GRAVITY = 2000; // 像素/秒^2
+    const JUMP_VELOCITY = 680; // 起跳速度
+
+    // 游戏状态
+    let state;
+    function resetState() {
+      state = {
+        running: true,
+        score: 0,
+        speed: 1.0, // 会逐渐增长
+        dino: { x: 60, y: GROUND_Y, w: 40, h: 44, vy: 0, onGround: true, leg: 0 },
+        obstacles: [],
+        cloudT: 0, // 云
+        lastSpawn: 0,
+        time: 0
+      };
+    }
+    resetState();
+
+    // 简单随机工具
+    const rnd = (a, b) => a + Math.random() * (b - a);
+
+    // 生成障碍（仙人掌）
+    function spawnObstacle() {
+      // 宽度随机，可能一到三连
+      const clusters = Math.random() < 0.35 ? 2 : (Math.random() < 0.15 ? 3 : 1);
+      let x = W + 20;
+      for (let i = 0; i < clusters; i++) {
+        const w = 16 + Math.floor(Math.random() * 18);
+        const h = 24 + Math.floor(Math.random() * 30);
+        state.obstacles.push({ x, y: GROUND_Y - h, w, h, type: 'cactus' });
+        x += w + 6; // 紧挨着形成簇
+      }
+    }
+
+    // 绘制恐龙（像素风）
+    function drawDino(d) {
+  ctx.save();
+  ctx.translate(d.x, d.y);
+
+  // Stickman / 火柴人造型
+  const baseY = d.h; // 底部相对高度
+  ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = '#222';
+
+  // 头
+  ctx.beginPath();
+  ctx.arc(18, baseY - 36, 8, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // 身体
+  ctx.beginPath();
+  ctx.moveTo(18, baseY - 28);
+  ctx.lineTo(18, baseY - 8);
+  ctx.stroke();
+
+  // 手臂（摆动动画）
+  const t = performance.now() / 1000; // 用当前时间做动画参数
+  const armSwing = (d.onGround ? Math.sin(t * 8 * (state?.speed || 1)) : 0) * 6;
+
+  ctx.beginPath();
+  ctx.moveTo(18, baseY - 24);
+  ctx.lineTo(18 - 12, baseY - 16 - armSwing);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(18, baseY - 24);
+  ctx.lineTo(18 + 12, baseY - 16 + armSwing);
+  ctx.stroke();
+
+  // 腿部动画
+  const step = d.onGround ? Math.sin(t * 10 * (state?.speed || 1)) : 0;
+  const legA = step * 8, legB = -step * 8;
+
+  ctx.beginPath();
+  ctx.moveTo(18, baseY - 8);
+  ctx.lineTo(18 - 10, baseY + 6 + legA);
+  ctx.stroke();
+
+  ctx.beginPath();
+  ctx.moveTo(18, baseY - 8);
+  ctx.lineTo(18 + 10, baseY + 6 + legB);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+
+    // 绘制地面和云
+    function drawGround() {
+      ctx.strokeStyle = '#777';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(0, GROUND_Y + 0.5);
+      ctx.lineTo(W, GROUND_Y + 0.5);
+      ctx.stroke();
+
+      // 云
+      state.cloudT += 0.2 * state.speed;
+      for (let i = 0; i < 3; i++) {
+        const cx = (i * 260 - (state.cloudT % 260));
+        const cy = 30 + 18 * Math.sin((i+1)*0.7);
+        ctx.fillStyle = 'rgba(180,180,180,0.6)';
+        ctx.beginPath();
+        ctx.arc(cx + 40, cy + 10, 12, 0, Math.PI*2);
+        ctx.arc(cx + 52, cy + 6, 10, 0, Math.PI*2);
+        ctx.arc(cx + 64, cy + 10, 12, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+
+  function drawObstacle(o) {
+    ctx.save();
+    ctx.translate(o.x, o.y + o.h);
+
+    // Draw an upright triangle (spike)
+    ctx.beginPath();
+    ctx.moveTo(0, 0);                 // bottom-left
+    ctx.lineTo(o.w / 2, -o.h);       // top (tip)
+    ctx.lineTo(o.w, 0);               // bottom-right
+    ctx.closePath();
+
+    ctx.fillStyle = '#444';           // dark gray spike
+    ctx.fill();
+    ctx.strokeStyle = '#222';         // edge outline
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.restore();
+  }
+
+    // AABB 碰撞
+    function collide(a, b) {
+      return !(a.x + a.w < b.x || a.x > b.x + b.w || a.y + a.h < b.y || a.y > b.y + b.h);
+    }
+
+    // 输入
+    let jumpQueued = false;
+    function jump() {
+      if (!state.running) return;
+      const d = state.dino;
+      if (d.onGround) {
+        d.vy = -JUMP_VELOCITY;
+        d.onGround = false;
+      } else {
+        // 二段跳（可选）
+        if (!jumpQueued) jumpQueued = true;
+      }
+    }
+    window.addEventListener('keydown', (e) => {
+      if (e.code === 'Space' || e.code === 'ArrowUp') { e.preventDefault(); jump(); }
+      if (e.key.toLowerCase() === 'r') restart();
+    }, { passive: false });
+    canvas.addEventListener('pointerdown', jump);
+    restartBtn.addEventListener('click', restart);
+
+    function restart() { resetState(); }
+
+    // 主循环
+    let last = performance.now();
+    function loop(now) {
+      const dt = Math.min(0.033, (now - last) / 1000); // 限帧
+      last = now;
+      update(dt);
+      render();
+      requestAnimationFrame(loop);
+    }
+
+    function update(dt) {
+      if (!state.running) return;
+      state.time += dt;
+
+      // 难度曲线：速度随时间增长
+      state.speed = 1.0 + Math.min(2.2, state.time * 0.08);
+      speedEl.textContent = state.speed.toFixed(1) + 'x';
+
+      // 计分（按速度）
+      state.score += dt * 100 * state.speed;
+      scoreEl.textContent = Math.floor(state.score);
+
+      // 恐龙物理
+      const d = state.dino;
+      d.vy += GRAVITY * dt;
+      d.y += d.vy * dt;
+      if (d.y >= GROUND_Y) {
+        d.y = GROUND_Y;
+        d.vy = 0;
+        if (!d.onGround && jumpQueued) {
+          // 二段跳触发窗口：刚落地的一瞬间
+          d.vy = -JUMP_VELOCITY * 0.9;
+          d.onGround = false;
+          jumpQueued = false;
+        } else {
+          d.onGround = true;
+          jumpQueued = false;
+        }
+      }
+      d.leg = (d.leg + dt * state.speed * 4) % 1;
+
+      // 障碍移动 + 回收
+      const vx = 260 * state.speed;
+      for (const o of state.obstacles) o.x -= vx * dt;
+      while (state.obstacles.length && state.obstacles[0].x + state.obstacles[0].w < -10) {
+        state.obstacles.shift();
+      }
+
+      // 生成障碍：基于时间与最小间隔
+      state.lastSpawn -= dt;
+      if (state.lastSpawn <= 0) {
+        spawnObstacle();
+        // 间隔随速度缩短
+        state.lastSpawn = rnd(Math.max(0.8, 1.8 - state.speed * 0.2), Math.max(1.2, 2.4 - state.speed * 0.2));
+      }
+
+      // 碰撞检测
+      const dBox = { x: d.x + 6, y: d.y - d.h + 6, w: d.w - 10, h: d.h - 8 };
+      for (const o of state.obstacles) {
+        const oBox = { x: o.x, y: o.y, w: o.w, h: o.h };
+        if (collide(dBox, oBox)) {
+          state.running = false;
+          break;
+        }
+      }
+    }
+
+    function render() {
+      // 清屏
+      ctx.clearRect(0, 0, W, H);
+
+      // 背景网格(微弱)
+      ctx.save();
+      ctx.globalAlpha = 0.04;
+      for (let x = 0; x < W; x += 20) {
+        ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, H); ctx.stroke();
+      }
+      for (let y = 0; y < H; y += 20) {
+        ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(W, y); ctx.stroke();
+      }
+      ctx.restore();
+
+      drawGround();
+
+      // Dino（坐标系注意：我们用 y 表示地平线高度，绘制时向上）
+      drawDino({ x: state.dino.x, y: state.dino.y - state.dino.h, w: state.dino.w, h: state.dino.h, onGround: state.dino.onGround, leg: state.dino.leg });
+
+      // 障碍
+      for (const o of state.obstacles) drawObstacle(o);
+
+      if (!state.running) {
+        ctx.fillStyle = '#e53935';
+        ctx.font = 'bold 22px system-ui, -apple-system, Segoe UI, Roboto';
+        ctx.textAlign = 'center';
+        ctx.fillText('Game Over', W/2, 70);
+        ctx.fillStyle = '#666';
+        ctx.font = '14px system-ui, -apple-system, Segoe UI, Roboto';
+        ctx.fillText('按 R 重新开始，或点击下方按钮', W/2, 95);
+        ctx.fillText('分数：' + Math.floor(state.score), W/2, 115);
+      }
+    }
+
+    requestAnimationFrame(loop);
+  })();
+  </script>
+</body>
+</html>
